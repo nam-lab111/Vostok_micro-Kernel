@@ -1,4 +1,5 @@
-//Ok tệp định nghĩa này là tôi cũng phải dùng AI để tạm thời định nghĩa nhưng mà nó lấy nhiều quá nên phải áp dụng trong avrkernel.c :)))))
+//Ok tệp định nghĩa này là tôi cũng phải dùng AI để tạm thời định nghĩa nhưng mà nó lấy nhiều quá (bằng lỗi) nên phải áp dụng trong avrkernel.c :)))))
+//Trừ một số hàm là phải bổ sung liên tục và sửa đổi và bổ sung để biên dịch đc avrkernel.c.
 #ifndef KERNEL_H
 #define KERNEL_H
 
