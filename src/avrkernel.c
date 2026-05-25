@@ -1,0 +1,456 @@
+#ifndef F_CPU
+#define F_CPU 16000000UL 
+#endif
+
+#include "avrkernel.h"
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <stddef.h>
+#include <avr/pgmspace.h>
+
+// ============= UART Register Compatibility =============
+// ATmega328 uses different register names (with _0 suffix)
+// ATmega32A uses simpler names without suffix
+#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega328__)
+    // ATmega328: Register names with _0 suffix
+    #define UBRRH UBRR0H
+    #define UBRRL UBRR0L
+    #define UCSRA UCSR0A
+    #define UCSRB UCSR0B
+    #define UCSRC UCSR0C
+    #define UDR   UDR0
+    #define RXEN  RXEN0
+    #define TXEN  TXEN0
+    #define UDRE  UDRE0
+    #define RXC   RXC0
+    #define UCSZ1 UCSZ01
+    #define UCSZ0 UCSZ00
+#endif
+// ======================================================
+
+PCB_t pcb_table[MAX_PROCS];
+PCB_t *current_proc = &pcb_table[0]; 
+
+uint8_t proc_stacks[MAX_PROCS][PROC_STACK_SZ];
+
+static pid_t next_pid = 1;
+volatile uint32_t sleep_ticks = 0;
+static uint8_t printed_once = 0;
+__attribute__((naked, noreturn))
+static void process_exit(void) {
+    __asm__ __volatile__ (
+        "cli\n\t"           
+        "jmp process_exit\n\t"  
+    );
+    __builtin_unreachable();
+}
+
+__attribute__((optimize("O0")))
+int k_sys_fork(void (*proc_code)(void)) {
+    int i;
+    PCB_t *p = 0;
+
+    for (i = 0; i < MAX_PROCS; i++) {
+        if (pcb_table[i].state == STATE_UNUSED) {
+            p = &pcb_table[i];
+            break;
+        }
+    }
+
+    if (p == 0) return -1;
+    p->state = STATE_EMBRYO;
+    p->pid = next_pid++;
+    uint8_t *stk = &proc_stacks[i][PROC_STACK_SZ - 1];
+    uint16_t proc_addr = (uint16_t)proc_code;
+    *stk-- = (uint8_t)(proc_addr & 0xFF);        
+    *stk-- = (uint8_t)((proc_addr >> 8) & 0xFF);
+    *stk-- = 0x00; 
+    *stk-- = 0x80;
+    for (int r = 1; r <= 31; r++) {
+        *stk-- = 0x00;
+    }
+
+    p->context_sp = stk;
+    p->state = STATE_READY;
+    return p->pid;
+}
+
+void k_uart_init(uint32_t baud) {
+    uint16_t ubrr_val = (F_CPU / (16UL * baud)) - 1;
+    UBRRH = (uint8_t)(ubrr_val >> 8);
+    UBRRL = (uint8_t)ubrr_val;
+    UCSRB = (1 << RXEN) | (1 << TXEN);
+    #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega328__)
+        UCSRC = (1 << UCSZ1) | (1 << UCSZ0);
+    #else
+        UCSRC = (1 << URSEL) | (1 << UCSZ1) | (1 << UCSZ0);
+    #endif
+}
+
+void k_timer_init(void) {
+    TCCR0A = 0x00;
+    TCCR0B = (1 << CS02) | (1 << CS00);
+    TIMSK0 |= (1 << TOIE0);
+}
+
+void k_servo_init(void) {
+    DDRB |= (1 << PB1);
+    TCCR1A = (1 << COM1A1) | (1 << WGM11);
+    TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11); 
+    ICR1 = 39999; 
+}
+
+void k_servo_write(uint8_t angle) {
+    OCR1A = 1000 + (angle * 1000 / 100);
+}
+
+void avr_button_init(void) {
+    DDRD &= ~(1 << DDD2);
+    PORTD |= (1 << PORTD2);
+}
+
+int avr_button_read(char *buf, int count) {
+    if (count < 1 || buf == NULL) return -1;
+    if (!(PIND & (1 << PIND2))) {
+        buf[0] = 1; 
+    } else {
+        buf[0] = 0; 
+    }
+
+    return 1; 
+}
+
+int8_t k_process_spawn(void (*proc_code)(void), const char *proc_name) {
+    k_uart_puts_P(PSTR("[Kernel] Spawning "));
+    k_uart_puts(proc_name);
+    k_uart_puts("...\n");
+    int pid = k_sys_fork(proc_code);
+    if (pid < 0) {
+        k_uart_puts_P(PSTR("[Kernel] [Error] Failed to spawn "));
+        k_uart_puts(proc_name);
+        k_uart_puts_P(PSTR(" (No empty PCB slot available!)\n"));
+        return -1;
+    }
+    k_uart_puts_P(PSTR("[Kernel] Process "));
+    k_uart_puts(proc_name);
+    k_uart_puts_P(PSTR(" spawned successfully (PID: "));
+    char pid_char = '0' + (uint8_t)pid;
+    k_uart_putc(pid_char);
+    k_uart_puts_P(PSTR(").\n"));
+    return 0;
+}
+
+void k_uart_putc(char c) {
+    while (!(UCSRA & (1 << UDRE)));
+    UDR = c;
+}
+
+void k_uart_puts(const char *s) {
+    uint8_t sreg = SREG; 
+    __asm__ __volatile__ ("cli"); 
+    while (*s) {
+        if (*s == '\n') {
+            k_uart_putc('\r');
+        }
+        k_uart_putc(*s++);
+    }
+    SREG = sreg; 
+}
+
+void k_uart_puts_P(const char *pgm_s) {
+    uint8_t sreg = SREG;
+    __asm__ __volatile__ ("cli");
+
+    char c;
+    while ((c = pgm_read_byte(pgm_s++))) {
+        if (c == '\n') {
+            k_uart_putc('\r');
+        }
+        k_uart_putc(c);
+    }
+
+    SREG = sreg;
+}
+
+char k_uart_getc(void) {
+    while (!(UCSRA & (1 << RXC)));
+    return UDR;
+}
+
+void k_i2c_init(void) {
+    TWSR = 0x00; 
+    TWBR = 72;   
+    TWCR = (1 << TWEN); 
+    k_uart_puts_P(PSTR("[Kernel] I2C Hardware Interface initialized (100kHz).\n"));
+}
+
+int k_i2c_write_async(uint8_t data) {
+    while (1) {
+        k_lock();
+        uint8_t next_head = (i2c_head + 1) % I2C_BUF_SIZE;
+        if (next_head == i2c_tail) {
+            current_proc->state = STATE_BLOCKED;
+            i2c_blocked_pid = current_proc->pid;
+            k_unlock();
+            TCNT0 = 0xFF; 
+            __asm__ __volatile__ ("nop");
+            continue; 
+        }
+        i2c_buffer[i2c_head] = data;
+        i2c_head = next_head;
+        if (!i2c_busy) {
+            i2c_busy = 1;
+            TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN) | (1 << TWIE);
+        }
+        
+        k_unlock();
+        return 0; 
+    }
+}
+
+void k_panic(const char *msg) {
+    k_uart_puts_P(PSTR("\n!!! Kernel Panic !!!\n"));
+    k_uart_puts(msg);
+    k_uart_puts_P(PSTR("\nSystem Halted.\n"));
+    while (1);
+}
+
+void k_sys_sleep(uint16_t ticks) {
+    if (ticks == 0) return;
+    uint8_t sreg = SREG;
+    __asm__ __volatile__ ("cli"); 
+    current_proc->sleep_ticks = ticks;
+    current_proc->state = STATE_SLEEPING; 
+    TCNT0 = 0xFF; 
+    __asm__ __volatile__ ("sei");
+    __asm__ __volatile__ ("nop"); 
+    __asm__ __volatile__ ("cli"); 
+    SREG = sreg; 
+}
+
+void k_kernel_init(void) {
+    k_uart_init(9600); 
+    k_uart_puts_P(PSTR("\n========================================================\n"));
+    k_uart_puts_P(PSTR("Vostok micro-Kernel for AVR 8bit Architecture Version I\n"));
+    k_uart_puts_P(PSTR("Kernel AVR Monolithic 2026.0.1\n"));
+    k_uart_puts_P(PSTR("Copyright (c) 2026, Le Khanh Nam, All rights reserved.\n"));
+    k_uart_puts_P(PSTR("========================================================\n"));
+    k_uart_puts_P(PSTR("[Kernel] Initializing Scheduler (reserving PCB[0] for kernel)...\n"));
+    scheduler_init();
+    k_i2c_init();
+}
+
+static uint8_t current_idx = 0; 
+
+void scheduler_init(void) {
+    pcb_table[0].pid = 0;
+    pcb_table[0].state = STATE_READY;
+    pcb_table[0].context_sp = &proc_stacks[0][PROC_STACK_SZ - 1];
+    current_idx = 0;
+    current_proc = &pcb_table[0];
+    pcb_table[0].state = STATE_RUNNING;
+}
+
+void schedule(void) {
+}
+
+
+void schedule_preemptive(void) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (pcb_table[i].state == STATE_SLEEPING) {
+            if (pcb_table[i].sleep_ticks > 0) {
+                pcb_table[i].sleep_ticks--; 
+            }
+            if (pcb_table[i].sleep_ticks == 0) {
+                pcb_table[i].state = STATE_READY;
+            }
+        }
+    }
+
+    uint8_t start_idx = current_idx;
+    uint8_t next_idx = current_idx;
+    PCB_t *old_proc = &pcb_table[current_idx];
+    PCB_t *new_proc = NULL;
+
+    if (old_proc->state == STATE_RUNNING) {
+        old_proc->state = STATE_READY;
+    }
+    do {
+        next_idx = (next_idx + 1) % MAX_PROCS;
+        if (pcb_table[next_idx].state == STATE_READY) {
+            new_proc = &pcb_table[next_idx];
+            break;
+        }
+    } while (next_idx != start_idx);
+
+    if (new_proc == NULL) {
+        next_idx = 0;
+        new_proc = &pcb_table[0];
+    }
+
+    if (old_proc != new_proc) {
+        if (!printed_once) {
+            k_uart_puts_P(PSTR("[Kernel] First context switch occurred.\n"));
+            printed_once = 1;
+        }
+
+        new_proc->state = STATE_RUNNING;
+        current_idx = next_idx;
+        current_proc = new_proc;
+    } else {
+        old_proc->state = STATE_RUNNING;
+    }
+}
+
+void k_lock(void) {
+    __asm__ __volatile__ ("cli");
+}
+
+void k_unlock(void) {
+    __asm__ __volatile__ ("sei");
+}
+
+void k_uart_puts_safe(const char *s) {
+    k_lock();
+    k_uart_puts(s);
+    k_unlock();
+}
+
+void k_sys_exit(void) {
+    k_lock();
+    current_proc->state = STATE_UNUSED;
+    current_proc->pid = 0;
+    k_unlock();
+    TCNT0 = 0xFF; 
+    while(1) {
+        __asm__ __volatile__ ("nop"); 
+    }
+}
+
+int k_sys_kill(pid_t pid) {
+    if (pid == 0 || pid == current_proc->pid) {
+        return -1; 
+    }
+    k_lock();
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (pcb_table[i].pid == pid && pcb_table[i].state != STATE_UNUSED) {
+            pcb_table[i].state = STATE_UNUSED;
+            pcb_table[i].pid = 0;
+            k_uart_puts_P(PSTR("[Kernel] Process killed successfully.\n"));
+            k_unlock();
+            return 0; 
+        }
+    }
+    
+    k_unlock();
+    return -2; 
+}
+
+int pipe_write(pipe_t *p, uint8_t data) {
+    while (1) {
+        k_lock();
+        if (p->count >= PIPE_SIZE && p->blocked_reader_pid == 0) {
+        }
+
+        if (p->count < PIPE_SIZE) {
+            p->buffer[p->head] = data;
+            p->head = (p->head + 1) % PIPE_SIZE;
+            p->count++;
+            if (p->blocked_reader_pid != 0) {
+                for (int i = 0; i < MAX_PROCS; i++) {
+                    if (pcb_table[i].pid == p->blocked_reader_pid) {
+                        pcb_table[i].state = STATE_READY; 
+                        p->blocked_reader_pid = 0;         
+                        break;
+                    }
+                }
+            }
+            k_unlock();
+            return 0; 
+        }
+        uint8_t reader_alive = 0;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (pcb_table[i].pid != 0 && pcb_table[i].pid != current_proc->pid) {
+                if (pcb_table[i].pid == 2 && pcb_table[i].state != STATE_UNUSED) {
+                    reader_alive = 1;
+                }
+            }
+        }
+
+        if (!reader_alive) {
+            k_unlock();
+            return -1; 
+        }
+        current_proc->state = STATE_BLOCKED;
+        p->blocked_writer_pid = current_proc->pid;
+        k_unlock();
+        TCNT0 = 0xFF;
+        __asm__ __volatile__ ("nop");
+    }
+}
+
+int pipe_read(pipe_t *p, uint8_t *data) {
+    while (1) {
+        k_lock();
+        if (p->count > 0) {
+            *data = p->buffer[p->tail];
+            p->tail = (p->tail + 1) % PIPE_SIZE;
+            p->count--;
+            if (p->blocked_writer_pid != 0) {
+                for (int i = 0; i < MAX_PROCS; i++) {
+                    if (pcb_table[i].pid == p->blocked_writer_pid) {
+                        pcb_table[i].state = STATE_READY;
+                        p->blocked_writer_pid = 0;
+                        break;
+                    }
+                }
+            }
+            k_unlock();
+            return 0; 
+        }
+        current_proc->state = STATE_BLOCKED;
+        p->blocked_reader_pid = current_proc->pid;
+        k_unlock();
+        TCNT0 = 0xFF; 
+    
+        __asm__ __volatile__ ("nop"); 
+    }
+}
+
+void sys_yield(void) {
+}
+
+ISR(TWI_vect) {
+    uint8_t status = TWSR & 0xF8; 
+    switch(status) {
+        case 0x08: 
+            TWDR = i2c_sla_w; 
+            TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWIE); 
+            break;
+        case 0x18: 
+        case 0x28: 
+            if (i2c_tail != i2c_head) {
+                TWDR = i2c_buffer[i2c_tail];
+                i2c_tail = (i2c_tail + 1) % I2C_BUF_SIZE;
+                TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWIE);
+                if (i2c_blocked_pid != 0) {
+                    for (int i = 0; i < MAX_PROCS; i++) {
+                        if (pcb_table[i].pid == i2c_blocked_pid) {
+                            pcb_table[i].state = STATE_READY;
+                            i2c_blocked_pid = 0;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+                i2c_busy = 0; 
+            }
+            break;
+
+        default:
+            TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+            i2c_busy = 0;
+            break;
+    }
+}

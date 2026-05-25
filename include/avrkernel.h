@@ -1,0 +1,112 @@
+//Ok tệp định nghĩa này là tôi cũng phải dùng AI để tạm thời định nghĩa nhưng mà nó lấy nhiều quá nên phải áp dụng trong avrkernel.c :)))))
+#ifndef KERNEL_H
+#define KERNEL_H
+
+#include <stdint.h>
+
+// ============================================================================
+// 1. CẤU HÌNH HỆ THỐNG (SYSTEM CONFIGURATION)
+// ============================================================================
+#define MAX_PROCS         4      // Số lượng tiến trình tối đa hệ thống hỗ trợ
+#define PROC_STACK_SZ     128    // Kích thước Kernel Stack cho mỗi tiến trình (bytes)
+#define MAX_FD            6      // Số lượng File Descriptor tối đa cho mỗi Proc
+#define PIPE_SIZE         16
+#define MAX_SYSTEM_FILES  8
+#define I2C_BUF_SIZE 32
+
+typedef uint16_t pid_t;
+
+static volatile uint8_t i2c_buffer[I2C_BUF_SIZE];
+static volatile uint8_t i2c_head = 0;
+static volatile uint8_t i2c_tail = 0;
+static volatile uint8_t i2c_busy = 0;
+static volatile uint8_t i2c_sla_w = 0x27 << 1; 
+static volatile pid_t i2c_blocked_pid = 0;
+
+
+typedef enum {
+    STATE_UNUSED = 0,   
+    STATE_EMBRYO,       
+    STATE_READY,        
+    STATE_RUNNING,      
+    STATE_BLOCKED,      
+    STATE_SLEEPING
+} proc_state_t;
+
+struct file; 
+
+struct file_operations {
+    int (*open)(struct file *f, const char *path, int flags);
+    int (*read)(struct file *f, char *buf, int count);
+    int (*write)(struct file *f, const char *buf, int count);
+    int (*close)(struct file *f);
+};
+
+struct file {
+    uint8_t type;                           
+    uint32_t offset;                        
+    uint8_t ref_count;
+    const struct file_operations *f_ops;    
+    void *private_data;
+};
+
+extern struct file g_file_table[MAX_SYSTEM_FILES];
+
+typedef struct {
+    uint8_t *context_sp;        
+    pid_t pid;                  
+    proc_state_t state;         
+    uint16_t sleep_ticks;
+    
+    // Lưu các con trỏ trỏ tới struct file của VFS
+    struct file *ofile[MAX_FD]; 
+} PCB_t;
+
+extern PCB_t pcb_table[MAX_PROCS];
+extern PCB_t *current_proc;
+
+typedef struct {
+    uint8_t buffer[PIPE_SIZE];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t count;
+    uint8_t readers;          
+    uint8_t writers;           
+    pid_t blocked_reader_pid;
+    pid_t blocked_writer_pid;
+} pipe_t;
+
+void schedule(void);
+void scheduler_init(void);
+void schedule_preemptive(void);
+void swtch(uint8_t **old_sp, uint8_t *new_sp);
+int k_sys_fork(void (*proc_code)(void)); 
+void k_sys_sleep(uint16_t ticks);
+void k_sys_exit(void);
+void sys_yield(void);
+void k_uart_init(uint32_t baud);
+void k_uart_putc(char c);
+void k_uart_puts(const char *s);
+void k_uart_puts_P(const char *pgm_s);
+void k_panic(const char *msg);
+void k_timer_init(void);  
+void k_lock(void);
+void k_unlock(void);
+void k_uart_puts_safe(const char *s);
+int pipe_write(pipe_t *p, uint8_t data);
+int pipe_read(pipe_t *p, uint8_t *data);
+int k_sys_open(const char *path, int flags);
+int k_sys_read(int fd, char *buf, int count);
+int k_sys_write(int fd, const char *buf, int count);
+int k_sys_close(int fd);
+char k_uart_getc(void);
+void k_servo_init(void);
+void k_servo_write(uint8_t angle);
+int8_t k_process_spawn(void (*proc_code)(void), const char *proc_name);
+void k_kernel_init(void);
+void k_i2c_init(void);
+int k_i2c_write_async(uint8_t data);
+void avr_button_init(void) ;
+int avr_button_read(char *buf, int count);
+
+#endif // KERNEL_H
