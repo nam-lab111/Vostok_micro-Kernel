@@ -4,15 +4,16 @@
 #define KERNEL_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 // ============================================================================
 // 1. CẤU HÌNH HỆ THỐNG (SYSTEM CONFIGURATION)
 // ============================================================================
 #define MAX_PROCS         4      // Số lượng tiến trình tối đa hệ thống hỗ trợ
 #define PROC_STACK_SZ     128    // Kích thước Kernel Stack cho mỗi tiến trình (bytes)
-#define MAX_FD            6      // Số lượng File Descriptor tối đa cho mỗi Proc
+#define MAX_FD            7      // Số lượng File Descriptor tối đa cho mỗi Proc
 #define PIPE_SIZE         16
-#define MAX_SYSTEM_FILES  8
+#define MAX_SYSTEM_FILES  9
 #define I2C_BUF_SIZE 32
 
 typedef uint16_t pid_t;
@@ -41,6 +42,22 @@ struct file_operations {
     int (*read)(struct file *f, char *buf, int count);
     int (*write)(struct file *f, const char *buf, int count);
     int (*close)(struct file *f);
+    int (*ioctl)(struct file *f, uint8_t cmd, uint16_t arg);
+};
+
+#define IOCTL_UART_SET_BAUD 1
+#define IOCTL_SERVO_SET_ANGLE 2
+#define IOCTL_BUTTON_GET_PIN 3
+#define IOCTL_AVRSPI_CHIP_SELECT 0x40
+#define IOCTL_AVRSPI_SET_SPEED 0x41
+#define SPI_CS_LOW 0
+#define SPI_CS_HIGH 1
+#define IOCTL_ADC_SET_CHANNEL    0x50
+
+struct spi_cs_pkt {
+    char port;        
+    uint8_t pin;     
+    uint8_t status;   
 };
 
 struct file {
@@ -109,5 +126,10 @@ void k_i2c_init(void);
 int k_i2c_write_async(uint8_t data);
 void avr_button_init(void) ;
 int avr_button_read(char *buf, int count);
+int k_sys_ioctl(int fd, uint8_t cmd, uintptr_t arg);
+void spi_init_master(void);
+uint8_t spi_transceive(uint8_t data);
+void adc_init_hardware(void);
+uint16_t adc_read_raw(uint8_t channel);
 
 #endif // KERNEL_H

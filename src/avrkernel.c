@@ -454,3 +454,41 @@ ISR(TWI_vect) {
             break;
     }
 }
+
+int k_sys_ioctl(int fd, uint8_t cmd, uint16_t arg) {
+    if (fd < 0 || fd >= MAX_FD) {
+        return -1; 
+    }
+    struct file *f = current_proc->ofile[fd];
+    if (f == NULL || f->f_ops == NULL || f->f_ops->ioctl == NULL) {
+        return -2; 
+    }
+    return f->f_ops->ioctl(f, cmd, arg);
+}
+
+void spi_init_master(void) {
+    DDRB |= (1 << DDB3) | (1 << DDB5) | (1 << DDB2);
+    DDRB &= ~(1 << DDB4);
+    SPCR = (1 << SPE) | (1 << MSTR) | (1 << SPR1) | (1 << SPR0);
+    SPSR &= ~(1 << SPI2X);
+    PORTB |= (1 << PORTB2);
+}
+
+uint8_t spi_transceive(uint8_t data) {
+    SPDR = data;
+    while (!(SPSR & (1 << SPIF)));
+    return SPDR;
+}
+
+void adc_init_hardware(void) {
+    ADMUX = (1 << REFS0); 
+    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+}
+
+uint16_t adc_read_raw(uint8_t channel) {
+    channel &= 0x07;
+    ADMUX = (ADMUX & 0xF0) | channel;
+    ADCSRA |= (1 << ADSC);
+    while (ADCSRA & (1 << ADSC));
+    return ADC;
+}
