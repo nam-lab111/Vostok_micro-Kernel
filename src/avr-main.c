@@ -46,45 +46,21 @@ void init_process(void) {
     /* ========================================================
        CRITICAL TIMING: ĐƯA CHIP VÀO CHẾ ĐỘ ISP (DỊCH TỪ ARDUINO ISP)
        ======================================================== */
-    
-    // 1. Đảm bảo chân SCK (PB5) đang ở mức LOW
     PORTB &= ~(1 << PORTB5);
-    k_sys_sleep(2); // delay(20ms) tương đương ~2 ticks (nếu 1 tick = 10ms)
-
-    // 2. Thả chân RESET của Slave lên HIGH (Giải phóng trước)
+    k_sys_sleep(2); 
     sram_cs.status = SPI_CS_HIGH;
     k_sys_ioctl(fd_spi, IOCTL_AVRSPI_CHIP_SELECT, (uintptr_t)&sram_cs);
-    k_sys_sleep(1); // Chờ một chút cho điện áp dâng lên
-
-    // 3. Kéo sụp chân RESET xuống LOW để kích hoạt bẫy ISP
+    k_sys_sleep(1); 
     sram_cs.status = SPI_CS_LOW;
     k_sys_ioctl(fd_spi, IOCTL_AVRSPI_CHIP_SELECT, (uintptr_t)&sram_cs);
-    k_sys_sleep(5); // Chờ 50ms (datasheet yêu cầu > 20ms) để Slave chuẩn bị phần cứng
-
-    /* ========================================================
-       BƯỚC 2: GỬI LỆNH KÍCH HOẠT PROGRAMMING ENABLE
-       ======================================================== */
-    // Lệnh 0xAC, 0x53, 0x00, 0x00 thần thánh từ ArduinoISP
+    k_sys_sleep(5); 
     vostok_isp_transaction(0xAC, 0x53, 0x00, 0x00);
-    k_sys_sleep(2); // Chờ mạch ISP của Slave khớp lệnh
-
-    /* ========================================================
-       BƯỚC 3: ĐỌC SIGNATURE CHIP ID (DỊCH TỪ READ_SIGNATURE)
-       ======================================================== */
-    // Bắn chuỗi liên tục 4 byte thô và hứng kết quả tức thì từ thanh ghi
+    k_sys_sleep(2); 
     chip_id[0] = vostok_isp_transaction(0x30, 0x00, 0x00, 0x00);
     chip_id[1] = vostok_isp_transaction(0x30, 0x00, 0x01, 0x00);
     chip_id[2] = vostok_isp_transaction(0x30, 0x00, 0x02, 0x00);
-
-    /* ========================================================
-       BƯỚC 4: GIẢI PHÓNG SLAVE KHỎI RESET
-       ======================================================== */
     sram_cs.status = SPI_CS_HIGH;
     k_sys_ioctl(fd_spi, IOCTL_AVRSPI_CHIP_SELECT, (uintptr_t)&sram_cs);
-
-    /* ========================================================
-       BƯỚC 5: IN KẾT QUẢ RA UART
-       ======================================================== */
     strcpy(log_buf, "[Vostok SPI Target ID] RAW HEX: ");
     k_sys_write(fd_uart, log_buf, strlen(log_buf));
 
