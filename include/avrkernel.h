@@ -10,10 +10,10 @@
 // 1. CẤU HÌNH HỆ THỐNG (SYSTEM CONFIGURATION)
 // ============================================================================
 #define MAX_PROCS         4      // Số lượng tiến trình tối đa hệ thống hỗ trợ
-#define PROC_STACK_SZ     128    // Kích thước Kernel Stack cho mỗi tiến trình (bytes)
-#define MAX_FD            7      // Số lượng File Descriptor tối đa cho mỗi Proc
+#define PROC_STACK_SZ     64    // Kích thước Kernel Stack cho mỗi tiến trình (bytes)
+#define MAX_FD            15      // Số lượng File Descriptor tối đa cho mỗi Proc
 #define PIPE_SIZE         16
-#define MAX_SYSTEM_FILES  9
+#define MAX_SYSTEM_FILES  18
 #define I2C_BUF_SIZE 32
 
 typedef uint16_t pid_t;
@@ -53,6 +53,48 @@ struct file_operations {
 #define SPI_CS_LOW 0
 #define SPI_CS_HIGH 1
 #define IOCTL_ADC_SET_CHANNEL    0x50
+#define IOCTL_EEPROM_SEEK 0x60
+#define IOCTL_EEPROM_CLEAR 0x61
+#define IOCTL_EEPROM_GET_SIZE 0x62
+#define IOCTL_PWM_INIT         1  
+#define IOCTL_PWM_SET_DUTY     2  
+#define IOCTL_PWM_DISABLE_CH   3
+#define IOCTL_GPIO_REQUEST_PIN   1  
+#define IOCTL_GPIO_SET_DIR_OUT   2  
+#define IOCTL_GPIO_SET_DIR_IN    3  
+#define IOCTL_GPIO_WRITE_HIGH    4  
+#define IOCTL_GPIO_WRITE_LOW     5  
+#define IOCTL_GPIO_READ_PIN      6  
+#define IOCTL_GPIO_RELEASE_PIN   7  
+#define IOCTL_WDT_ENABLE      0x10
+#define IOCTL_WDT_DISABLE     0x20
+#define IOCTL_WDT_KICK        0x30
+#define IOCTL_WDT_SET_TIMEOUT 0x40
+#define IOCTL_INTR_ENABLE      1
+#define IOCTL_INTR_DISABLE     2
+#define INTR_MODE_LOW          0x00 
+#define INTR_MODE_TOGGLE       0x01 
+#define INTR_MODE_FALLING      0x02 
+#define INTR_MODE_RISING       0x03 
+
+#define PIN_0   0
+#define PIN_1   1
+#define PIN_2   2
+#define PIN_3   3
+#define PIN_4   4
+#define PIN_5   5
+#define PIN_6   6
+#define PIN_7   7
+
+#define RESERVED_PINS_PORTB  0x0E 
+#define RESERVED_PINS_PORTD  0x0B
+
+#define WDT_15MS   (1 << WDE)
+#define WDT_500MS  (1 << WDE) | (1 << WDP2) | (1 << WDP0)
+#define WDT_1S     (1 << WDE) | (1 << WDP2) | (1 << WDP1)
+#define WDT_2S     (1 << WDE) | (1 << WDP2) | (1 << WDP1) | (1 << WDP0)
+#define WDT_4S     (1 << WDE) | (1 << WDP3)
+#define WDT_8S     (1 << WDE) | (1 << WDP3) | (1 << WDP0)
 
 struct spi_cs_pkt {
     char port;        
@@ -94,6 +136,23 @@ typedef struct {
     pid_t blocked_writer_pid;
 } pipe_t;
 
+typedef struct {
+    volatile uint8_t *tccra;
+    volatile uint8_t *tccrb;
+    volatile void    *ocr_a;   
+    volatile void    *ocr_b;
+    volatile uint8_t *ddr_a;
+    volatile uint8_t *ddr_b;
+    uint8_t pin_a;
+    uint8_t pin_b;
+} avr_pwm_hardware_t;
+
+struct sysinfo_data {
+    uint32_t uptime;
+    uint8_t  active;
+    uint16_t free_ram;
+};
+
 void schedule(void);
 void scheduler_init(void);
 void schedule_preemptive(void);
@@ -131,5 +190,15 @@ void spi_init_master(void);
 uint8_t spi_transceive(uint8_t data);
 void adc_init_hardware(void);
 uint16_t adc_read_raw(uint8_t channel);
+uint8_t eepromatmega_read (uint16_t addr);
+void eepromatmega_write(uint16_t addr, uint8_t data);
+void avr_pwm_raw_init(uint8_t timer_idx);
+void avr_pwm_raw_set_duty(uint8_t timer_idx, uint8_t channel, uint8_t duty);
+void k_wdt_core_enable(uint8_t timeout_val);
+void k_wdt_core_disable(void);
+static inline void k_wdt_core_kick(void) {
+    __asm__ __volatile__("wdr");
+}
+void k_uart_put_num(uint16_t num);
 
 #endif // KERNEL_H

@@ -11,8 +11,7 @@
 ; TRẠM TRUNG CHUYỂN NGẮT CỨNG PREEMPTIVE (LƯU TOÀN BỘ 32 THANH GHI)
 ; ============================================================================
 TIMER0_OVF_vect:
-    ; Khi nhảy vào đây, phần cứng đã tự động PUSH PC (2 bytes)
-    
+    wdr
     ; --- BƯỚC 1: LƯU TOÀN BỘ NGỮ CẢNH (R0-R31 + SREG) ---
     PUSH    r0
     IN      r0, _SFR_IO_ADDR(SREG)

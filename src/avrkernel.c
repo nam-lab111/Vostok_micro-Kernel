@@ -8,6 +8,9 @@
 #include <stddef.h>
 #include <avr/pgmspace.h>
 
+extern unsigned int __bss_end;
+extern void *__brkval;
+
 // ============= UART Register Compatibility =============
 // ATmega328 uses different register names (with _0 suffix)
 // ATmega32A uses simpler names without suffix
@@ -36,6 +39,8 @@ uint8_t proc_stacks[MAX_PROCS][PROC_STACK_SZ];
 static pid_t next_pid = 1;
 volatile uint32_t sleep_ticks = 0;
 static uint8_t printed_once = 0;
+volatile uint16_t k_intr0_counter = 0;
+volatile uint16_t k_intr1_counter = 0;
 __attribute__((naked, noreturn))
 static void process_exit(void) {
     __asm__ __volatile__ (
@@ -177,6 +182,22 @@ char k_uart_getc(void) {
     return UDR;
 }
 
+void k_uart_put_num(uint16_t num) {
+    if (num == 0) {
+        k_uart_putc('0');
+        return;
+    }
+    char buf[5]; 
+    int8_t i = 0;
+    while (num > 0) {
+        buf[i++] = '0' + (num % 10);
+        num /= 10;
+    }
+    for (int8_t j = i - 1; j >= 0; j--) {
+        k_uart_putc(buf[j]);
+    }
+}
+
 void k_i2c_init(void) {
     TWSR = 0x00; 
     TWBR = 72;   
@@ -229,15 +250,18 @@ void k_sys_sleep(uint16_t ticks) {
 }
 
 void k_kernel_init(void) {
+    k_wdt_core_disable();
     k_uart_init(9600); 
     k_uart_puts_P(PSTR("\n========================================================\n"));
-    k_uart_puts_P(PSTR("Vostok micro-Kernel for AVR 8bit Architecture Version I\n"));
-    k_uart_puts_P(PSTR("Kernel AVR Monolithic 2026.0.1\n"));
+    k_uart_puts_P(PSTR("Vostok MPKernel for AVR 8bit Architecture Version I\n"));
+    k_uart_puts_P(PSTR("Kernel AVR Monolithic 2026.0.2\n"));
     k_uart_puts_P(PSTR("Copyright (c) 2026, Le Khanh Nam, All rights reserved.\n"));
     k_uart_puts_P(PSTR("========================================================\n"));
     k_uart_puts_P(PSTR("[Kernel] Initializing Scheduler (reserving PCB[0] for kernel)...\n"));
     scheduler_init();
     k_i2c_init();
+    k_wdt_core_enable(WDT_2S);
+    k_uart_puts_P(PSTR("[Kernel] Watchdog Protection Core enabled.\n"));
 }
 
 static uint8_t current_idx = 0; 
@@ -491,4 +515,128 @@ uint16_t adc_read_raw(uint8_t channel) {
     ADCSRA |= (1 << ADSC);
     while (ADCSRA & (1 << ADSC));
     return ADC;
+}
+
+uint8_t eepromatmega_read (uint16_t addr) {
+    while (EECR & (1 << EEPE));
+    EEARH = (uint8_t)(addr >> 8);
+    EEARL = (uint8_t)(addr & 0xFF);
+    EECR |= (1 << EERE);
+    return EEDR;
+}
+
+void eepromatmega_write(uint16_t addr, uint8_t data) {
+    while (EECR & (1 << EEPE));
+    EEARH = (uint8_t)(addr >> 8);
+    EEARL = (uint8_t)(addr & 0xFF);
+    EEDR = data;
+    uint8_t sreg = SREG;
+    k_lock();
+    EECR |= (1 << EEMPE);
+    EECR |= (1 << EEPE);
+    SREG = sreg;
+}
+
+const avr_pwm_hardware_t pwm_timers[] = {
+    [0] = { // Timer1 - Kênh B duy nhất (Chân 10 - Chỉ băm xung tần số thấp/Servo 2)
+        .tccra = (volatile uint8_t *)&TCCR1A,
+        .tccrb = (volatile uint8_t *)&TCCR1B,
+        .ocr_a = (volatile uint16_t *)&OCR1A, // Vẫn giữ để tham chiếu nếu cần
+        .ocr_b = (volatile uint16_t *)&OCR1B, // Ghi duty vào đây để xuất ra chân 10
+        .ddr_a = (volatile uint8_t *)&DDRB,   
+        .ddr_b = (volatile uint8_t *)&DDRB,   // Chân 10 nằm ở PORTB
+        .pin_a = PB1, 
+        .pin_b = PB2  // Chân 10
+    },
+    [1] = { // Timer2 - Nguyên vẹn hoàn toàn (Quản lý chân 11 và chân 3)
+        .tccra = (volatile uint8_t *)&TCCR2A,
+        .tccrb = (volatile uint8_t *)&TCCR2B,
+        .ocr_a = (volatile uint16_t *)&OCR2A, // Ghi duty Kênh A -> xuất ra chân 11
+        .ocr_b = (volatile uint16_t *)&OCR2B, // Ghi duty Kênh B -> xuất ra chân 3
+        .ddr_a = (volatile uint8_t *)&DDRB,   // Chân 11 nằm ở PORTB
+        .ddr_b = (volatile uint8_t *)&DDRD,   // Chân 3 nằm ở PORTD
+        .pin_a = PB3, // Chân 11
+        .pin_b = PD3  // Chân 3
+    }
+};
+
+void avr_pwm_raw_init(uint8_t timer_idx) {
+    if (timer_idx >= 2) return;
+    const avr_pwm_hardware_t *hw = &pwm_timers[timer_idx];
+    if (timer_idx == 0) {
+        *(hw->tccra) |= (1 << COM1B1) | (1 << WGM10);
+        *(hw->tccrb) |= (1 << WGM12) | (1 << CS11); 
+        *(volatile uint16_t *)(hw->ocr_b) = 0;
+    } 
+    else if (timer_idx == 1) {
+        *(hw->tccra) = (1 << COM2A1) | (1 << COM2B1) | (1 << WGM21) | (1 << WGM20);
+        *(hw->tccrb) = (1 << CS21); 
+        *(volatile uint8_t *)(hw->ocr_a) = 0;
+        *(volatile uint8_t *)(hw->ocr_b) = 0;
+    }
+}
+
+void avr_pwm_raw_set_duty(uint8_t timer_idx, uint8_t channel, uint8_t duty) {
+    if (timer_idx >= 2) return;
+    const avr_pwm_hardware_t *hw = &pwm_timers[timer_idx];
+    if (channel == 0) { 
+        if (timer_idx == 0) {
+            return; 
+        } else {
+            *(hw->ddr_a) |= (1 << hw->pin_a);
+            *(volatile uint8_t *)(hw->ocr_a) = duty;
+        }
+    } 
+    else {            
+        if (timer_idx == 0) {
+            *(hw->ddr_b) |= (1 << hw->pin_b);
+            *(volatile uint16_t *)(hw->ocr_b) = (uint16_t)duty;
+        } else {
+            *(hw->ddr_b) |= (1 << hw->pin_b);
+            *(volatile uint8_t *)(hw->ocr_b) = duty;
+        }
+    }
+}
+
+void k_wdt_core_enable(uint8_t timeout_val) {
+    uint8_t sreg = SREG;
+    cli();
+    __asm__ __volatile__("wdr");
+    MCUSR &= ~(1 << WDRF);
+    WDTCSR |= (1 << WDCE) | (1 << WDE);
+    WDTCSR = timeout_val;
+    SREG = sreg;
+}
+
+void k_wdt_core_disable(void) {
+    uint8_t sreg = SREG;
+    cli();
+    __asm__ __volatile__("wdr");
+    MCUSR &= ~(1 << WDRF);
+    WDTCSR |= (1 << WDCE) | (1 << WDE);
+    WDTCSR = 0x00; 
+    SREG = sreg;
+}
+
+uint16_t k_get_free_ram(void) {
+    uint16_t static_and_heap_end = (uint16_t)&__bss_end;
+    if (__brkval != 0) {
+        static_and_heap_end = (uint16_t)__brkval;
+    }
+    uint16_t total_allocated_stack = 0;
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (pcb_table[i].state != STATE_UNUSED) {
+            total_allocated_stack += PROC_STACK_SZ;
+        }
+    }
+    uint16_t free_ram = 2048 - (static_and_heap_end + total_allocated_stack);    
+    return free_ram;
+}
+
+ISR(INT0_vect) {
+    k_intr0_counter++; 
+}
+
+ISR(INT1_vect) {
+    k_intr1_counter++; 
 }
