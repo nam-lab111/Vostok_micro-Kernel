@@ -153,6 +153,14 @@ struct sysinfo_data {
     uint16_t free_ram;
 };
 
+typedef struct block_header {
+    uint16_t size;
+    struct block_header *next;
+} block_header_t;
+
+#define BLOCK_FREE_MASK 0x8000
+#define BLOCK_SIZE_MASK 0x7FFF
+
 void schedule(void);
 void scheduler_init(void);
 void schedule_preemptive(void);
@@ -200,5 +208,9 @@ static inline void k_wdt_core_kick(void) {
     __asm__ __volatile__("wdr");
 }
 void k_uart_put_num(uint16_t num);
+void k_mem_init(void);
+void* k_malloc(size_t size);
+uint16_t k_get_free_heap(void);
+void k_free(void *ptr);
 
 #endif // KERNEL_H

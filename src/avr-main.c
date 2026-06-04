@@ -14,74 +14,84 @@ extern void dino_testinit_main(void);
 #define AVR_CMD_PROG_ENABLE     0xAC //keep - no delete, because kernel is not already
 #define AVR_CMD_READ_SIGNATURE  0x30 //keep - no delete, because kernel is not already
 
-void init_process(void) {
-    int fd0 = k_sys_open("/dev/avrintr0", 0);
-    int fd1 = k_sys_open("/dev/avrintr1", 0);
+void user_process_2(void); 
+void user_process_3(void);
 
-    if (fd0 < 0 || fd1 < 0) {
-        k_uart_puts_P(PSTR("[User] Lỗi: Không thể mở /dev/intr0 hoặc /dev/intr1!\n"));
-        k_sys_exit();
+typedef struct {
+    void (*proc_code)(void);
+    const char *name;
+} boot_node_t;
+
+void vostok_init_task(void) {
+    k_uart_puts_P(PSTR("\n====================================================\n"));
+    k_uart_puts_P(PSTR("[init (PID 1)] Đã chiếm quyền điều khiển User-space!\n"));
+    k_uart_puts_P(PSTR("====================================================\n"));
+    boot_node_t *boot_list = (boot_node_t *)k_malloc(sizeof(boot_node_t) * 2);
+    if (boot_list == NULL) {
+        k_panic("Init Panic: Không đủ Heap để khởi tạo danh sách boot_list!");
     }
-    k_sys_ioctl(fd0, IOCTL_INTR_ENABLE, INTR_MODE_FALLING);
-    k_sys_ioctl(fd1, IOCTL_INTR_ENABLE, INTR_MODE_FALLING);
-
-    k_uart_puts_P(PSTR("[User] Tiến trình test Ngắt đã chạy! Hãy nhấn nút ở chân PD2 và PD3.\n"));
-
-    uint16_t count0 = 0;
-    uint16_t count1 = 0;
-    uint16_t last_count0 = 0;
-    uint16_t last_count1 = 0;
-
+    boot_list[0].proc_code = user_process_2;
+    boot_list[0].name = "User_Process_2";
+    boot_list[1].proc_code = user_process_3;
+    boot_list[1].name = "User_Process_3";
+    for (uint8_t i = 0; i < 2; i++) {
+        k_uart_puts_P(PSTR("[init] Chuẩn bị gọi nhân sinh task: "));
+        k_uart_puts(boot_list[i].name);
+        k_uart_puts_P(PSTR("\n"));
+        k_process_spawn(boot_list[i].proc_code, boot_list[i].name);
+        k_sys_sleep(10); 
+    }
+    k_free(boot_list);
+    k_uart_puts_P(PSTR("[init] Đã dọn dẹp bộ nhớ boot_list. Heap đã được phục hồi!\n"));
     while (1) {
-        int r0 = k_sys_read(fd0, (char *)&count0, sizeof(uint16_t));
-        int r1 = k_sys_read(fd1, (char *)&count1, sizeof(uint16_t));
-        if (count0 != last_count0 || count1 != last_count1) {
-            k_uart_puts_P(PSTR("[OK] INT0: "));
-            k_uart_put_num(count0);
-            k_uart_puts_P(PSTR(" phát | INT1: "));
-            k_uart_put_num(count1);
-            k_uart_puts_P(PSTR(" phát\n"));
-
-            last_count0 = count0;
-            last_count1 = count1;
-        }
-        k_sys_sleep(50); 
+        k_sys_sleep(250); 
     }
 }
 
-const char msg_sys_header[] PROGMEM = "\nMPKernel Version 0.2 VostokMPK 2026.0.2\n";
-const char msg_sys_tasks[]  PROGMEM = "Active Tasks: ";
-const char msg_sys_ram[]    PROGMEM = "\nReal Free RAM: "; 
-const char msg_sys_bytes[]  PROGMEM = " Bytes";
-const char msg_sys_footer[] PROGMEM = "\n-------------------------\n";
-
-void user_process2(void) {
-    k_sys_exit();
-}
-
-void user_process3(void) {
-    int uart_fd = k_sys_open("/dev/uart0", 0);
-    int servo_fd = k_sys_open("/dev/avrservo0", 0);
-    if (uart_fd < 0) {
-        k_uart_puts_P(PSTR("[User Process 3] [Error] Khong the mo UART qua VFS!\n"));
+void user_process_2(void) {
+    k_uart_puts_P(PSTR("[User] Tiến trình test PWM đã chạy!\n"));
+    int fd_ec0 = k_sys_open("/dev/ec0", 0); 
+    int fd_ec1 = k_sys_open("/dev/ec1", 0); 
+    if (fd_ec0 < 0 || fd_ec1 < 0) {
+        k_uart_puts_safe("[Test PWM] Lỗi: Không thể mở Node /dev/ec0 hoặc /dev/ec1!\n");
         while(1);
     }
-    const char *msg3 = "[User Process 3] Servo da duoc dieu khien\n";
-    k_sys_write(uart_fd, msg3, strlen(msg3));
+    k_sys_ioctl(fd_ec0, IOCTL_PWM_INIT, 0);
+    k_sys_ioctl(fd_ec1, IOCTL_PWM_INIT, 0);
+    
+    k_uart_puts_safe("[Test PWM] Đã kích hoạt luồng băm xung độc lập cho Chân 10 và Chân 11...\n");
+
+    uint8_t duty_led = 0;
+    int8_t direction = 1; 
+
+    char buf_ec0[1];
+    char buf_ec1[2];
+
     while (1) {
-        k_sys_ioctl(servo_fd, IOCTL_SERVO_SET_ANGLE, 0);
-        k_sys_sleep(100);
-        k_sys_ioctl(servo_fd, IOCTL_SERVO_SET_ANGLE, 90);
-        k_sys_sleep(100);
+        buf_ec0[0] = duty_led;
+        k_sys_write(fd_ec0, buf_ec0, 1);
+        buf_ec1[0] = duty_led; 
+        buf_ec1[1] = duty_led; 
+        k_sys_write(fd_ec1, buf_ec1, 2);
+        duty_led += direction;
+        if (duty_led == 255) {
+            direction = -1;
+        } else if (duty_led == 0) {
+            direction = 1;
+        }
+
+        k_sys_sleep(2); 
     }
-    k_sys_sleep(30);
+}
+
+void user_process_3(void) {
+    k_sys_exit();
 }
 
 int main(void) {
     k_kernel_init();
-    k_process_spawn(init_process, "Init Process");
-    k_process_spawn(user_process2, "User Process 2");
-    k_process_spawn(user_process3, "User Process 3");
+    k_uart_puts_P(PSTR("[Kernel] Initiating the original Init process...\n"));
+    k_process_spawn(vostok_init_task, "init");
     avr_button_init();
     k_timer_init();
     k_servo_init();

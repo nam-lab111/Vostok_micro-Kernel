@@ -31,6 +31,10 @@ extern void *__brkval;
 #endif
 // ======================================================
 
+#define KERNEL_HEAP_SIZE 128
+static uint8_t k_heap_pool[KERNEL_HEAP_SIZE];
+static block_header_t *heap_start = NULL;
+
 PCB_t pcb_table[MAX_PROCS];
 PCB_t *current_proc = &pcb_table[0]; 
 
@@ -259,6 +263,7 @@ void k_kernel_init(void) {
     k_uart_puts_P(PSTR("========================================================\n"));
     k_uart_puts_P(PSTR("[Kernel] Initializing Scheduler (reserving PCB[0] for kernel)...\n"));
     scheduler_init();
+    k_mem_init();
     k_i2c_init();
     k_wdt_core_enable(WDT_2S);
     k_uart_puts_P(PSTR("[Kernel] Watchdog Protection Core enabled.\n"));
@@ -633,10 +638,80 @@ uint16_t k_get_free_ram(void) {
     return free_ram;
 }
 
+uint16_t k_get_free_heap(void) {
+    k_lock();
+    uint16_t total_free_bytes = 0;
+    block_header_t *curr = heap_start;
+    while (curr != NULL) {
+        if (curr->size & BLOCK_FREE_MASK) {
+            total_free_bytes += (curr->size & BLOCK_SIZE_MASK);
+        }
+        curr = curr->next;
+    }
+    k_unlock();
+    return total_free_bytes;
+}
+
 ISR(INT0_vect) {
     k_intr0_counter++; 
 }
 
 ISR(INT1_vect) {
     k_intr1_counter++; 
+}
+
+void k_mem_init(void) {
+    heap_start = (block_header_t *)k_heap_pool;
+    heap_start->size = (KERNEL_HEAP_SIZE - sizeof(block_header_t)) | BLOCK_FREE_MASK;
+    heap_start->next = NULL;
+}
+
+void* k_malloc(size_t size) {
+    if (size == 0) return NULL;
+    if (size % 2 != 0) size++;
+    k_lock();
+    block_header_t *curr = heap_start;
+    while (curr != NULL) {
+        uint16_t curr_size = curr->size & BLOCK_SIZE_MASK;
+        uint8_t is_free = (curr->size & BLOCK_FREE_MASK) ? 1 : 0;
+        if (is_free && curr_size >= size) {
+            if (curr_size >= size + sizeof(block_header_t) + 2) {
+                block_header_t *new_block = (block_header_t *)((uint8_t*)curr + sizeof(block_header_t) + size);
+                new_block->size = (curr_size - size - sizeof(block_header_t)) | BLOCK_FREE_MASK;
+                new_block->next = curr->next;
+                curr->size = size; // Xóa cờ FREE, cập nhật size mới gọn hơn
+                curr->next = new_block;
+            } else {
+                curr->size &= BLOCK_SIZE_MASK; 
+            }
+            k_unlock();
+            return (void*)((uint8_t*)curr + sizeof(block_header_t)); // Trả về vùng payload
+        }
+        curr = curr->next;
+    }
+    k_unlock();
+    return NULL; 
+}
+
+void k_free(void *ptr) {
+    if (ptr == NULL) return;
+    k_lock();
+    block_header_t *header = (block_header_t *)((uint8_t*)ptr - sizeof(block_header_t));
+    header->size |= BLOCK_FREE_MASK; 
+    block_header_t *curr = heap_start;
+    while (curr != NULL && curr->next != NULL) {
+        uint8_t curr_free = (curr->size & BLOCK_FREE_MASK) ? 1 : 0;
+        uint8_t next_free = (curr->next->size & BLOCK_FREE_MASK) ? 1 : 0;
+        
+        if (curr_free && next_free) {
+            uint16_t new_size = (curr->size & BLOCK_SIZE_MASK) + 
+                                sizeof(block_header_t) + 
+                                (curr->next->size & BLOCK_SIZE_MASK);
+            curr->size = new_size | BLOCK_FREE_MASK;
+            curr->next = curr->next->next; 
+        } else {
+            curr = curr->next;
+        }
+    }
+    k_unlock();
 }
